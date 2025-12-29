@@ -188,7 +188,7 @@ async function joinRoom(roomId, roleHint = null){
   roomIdLabel.textContent = roomId;
   presenterLabel.textContent = shortId(room.presenter);
   placerLabel.textContent = shortId(room.placer);
-  localRoleLabel.textContent = `You: ${localRole}`;
+  localRoleLabel.textContent = `4You: ${localRole}`;
   boardSection.hidden = false;
   attachRoomListener(roomId);
 }
