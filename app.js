@@ -273,7 +273,7 @@ function renderState(state){
     resultEl.hidden = true;
   } else if(phase === 'offering' || phase === 'placing' || phase === 'ready'){
     // default: offering means presenter should offer; placing means a coin must be placed on currentOffered
-    const offered = state.currentOffered;
+    const offered = state.currentOffered ?? null;
     if(phase === 'offering'){
       infoEl.textContent = `Presenter's turn — offer a basket (turn ${state.turn+1}/4)`;
     } else if(phase === 'placing'){
