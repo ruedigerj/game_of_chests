@@ -1,11 +1,8 @@
 // Multiplayer Game of Chests using Firebase Realtime Database + Anonymous Auth
 // Defaults: coinCount = 5, compensation = 2.
-// Updated: the end-of-game message now reports the result from the guest's perspective.
-// The "guest" is the second person to join the room (we record presenterJoinedAt and placerJoinedAt).
-// When the round finishes we compute the guest's role, guestScore and opponentScore and show:
-// - "My guest wins G : O"
-// - "My guest loses G : O"
-// - "The game ended in a draw G : G"
+// Updated: guest detection now uses the room.creator (the user who created the room).
+// The creator is set when a room is created; the guest is the other player who joins later.
+// Falls back to timestamps only if creator is missing (older rooms).
 //
 // Added: play a short click sound each time a coin is placed.
 //
@@ -103,8 +100,6 @@ function initialState(coinCount = 5, compensation = 2){
 }
 
 // --- Click sound setup (Web Audio API)
-// We'll create a single AudioContext and play a short percussive click using an oscillator + gain envelope.
-// This avoids needing an external audio file.
 const audioCtx = (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
   ? new (window.AudioContext || window.webkitAudioContext)()
   : null;
@@ -112,32 +107,22 @@ const audioCtx = (typeof window !== 'undefined' && (window.AudioContext || windo
 function playClick(){
   if(!audioCtx) return;
   try{
-    // Resume context if suspended (required on some browsers until user gesture)
     if(audioCtx.state === 'suspended') {
       audioCtx.resume().catch(()=>{/* ignore */});
     }
     const now = audioCtx.currentTime;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
-
-    // Short high-frequency click
     osc.type = 'square';
     osc.frequency.setValueAtTime(1200, now);
-
-    // Envelope: quick attack, fast decay
     gain.gain.setValueAtTime(0.0001, now);
     gain.gain.exponentialRampToValueAtTime(0.12, now + 0.001);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
-
     osc.connect(gain);
     gain.connect(audioCtx.destination);
-
     osc.start(now);
     osc.stop(now + 0.07);
-
-    // Cleanup will happen automatically when node is garbage-collected; no references kept
   }catch(err){
-    // swallow audio errors to avoid breaking game logic
     console.warn('playClick error', err);
   }
 }
@@ -163,7 +148,6 @@ function ensureLobbyControls(){
   const lobbyControls = document.getElementById('lobby-controls');
   if(!lobbyControls) return;
 
-  // coin count
   const ccWrapper = document.createElement('div');
   ccWrapper.style.display = 'flex';
   ccWrapper.style.gap = '8px';
@@ -177,10 +161,9 @@ function ensureLobbyControls(){
     opt.textContent = String(n);
     select.appendChild(opt);
   }
-  select.value = '5'; // default UI value
+  select.value = '5';
   ccWrapper.appendChild(select);
 
-  // compensation
   const compWrapper = document.createElement('div');
   compWrapper.style.display = 'flex';
   compWrapper.style.gap = '8px';
@@ -194,10 +177,9 @@ function ensureLobbyControls(){
     opt.textContent = String(c);
     cselect.appendChild(opt);
   }
-  cselect.value = '2'; // default UI value
+  cselect.value = '2';
   compWrapper.appendChild(cselect);
 
-  // refresh button
   const rWrapper = document.createElement('div');
   rWrapper.style.display = 'flex';
   rWrapper.style.alignItems = 'center';
@@ -210,7 +192,6 @@ function ensureLobbyControls(){
   rbtn.disabled = false;
   rWrapper.appendChild(rbtn);
 
-  // Insert before createRoomBtn
   lobbyControls.insertBefore(ccWrapper, createRoomBtn);
   lobbyControls.insertBefore(compWrapper, createRoomBtn);
   lobbyControls.insertBefore(rWrapper, createRoomBtn);
@@ -225,33 +206,19 @@ function ensureLobbyControls(){
 }
 ensureLobbyControls();
 
-// Helper to display short id in messages
 function shortId(u){ return u ? u.slice(0,8) : '—'; }
 
-// --- When assigning roles we now also store timestamps so we can tell who joined second
-// Helper to set role with timestamp (used in create/join/refresh)
+// Helper to set role with timestamp
 function assignRoleWithTimestamp(obj, role, uidToAssign){
   const now = Date.now();
   if(role === 'presenter'){
     obj.presenter = uidToAssign;
     obj.presenterJoinedAt = now;
-    // clear if same uid occupied other role
     if(obj.placer === uidToAssign) { obj.placer = null; obj.placerJoinedAt = null; }
   } else if(role === 'placer'){
     obj.placer = uidToAssign;
     obj.placerJoinedAt = now;
     if(obj.presenter === uidToAssign) { obj.presenter = null; obj.presenterJoinedAt = null; }
-  }
-}
-
-// Helper to clear role and its timestamp
-function clearRole(obj, role){
-  if(role === 'presenter'){
-    obj.presenter = null;
-    obj.presenterJoinedAt = null;
-  } else if(role === 'placer'){
-    obj.placer = null;
-    obj.placerJoinedAt = null;
   }
 }
 
@@ -300,13 +267,13 @@ async function handleRefreshClick(){
       }
 
       // Role assignment logic (force-take automatically).
-      // We use helper to set timestamp when assigning.
       if(selectedRole === 'presenter'){
         assignRoleWithTimestamp(cur, 'presenter', uid);
       } else if(selectedRole === 'placer'){
         assignRoleWithTimestamp(cur, 'placer', uid);
       }
 
+      // Preserve creator if present. We don't overwrite creator on refresh.
       // Set the restarted state
       cur.state = newState;
       return cur;
@@ -317,7 +284,6 @@ async function handleRefreshClick(){
     return;
   }
 
-  // Update UI locally and confirm
   renderCoinControls(selectedCoinCount, newState.remaining);
   try {
     const snap2 = await get(roomRefPath);
@@ -358,7 +324,6 @@ function renderCoinControls(coinCount, remaining){
 }
 
 // --- Place coin (transaction)
-// We play a click sound after a successful place transaction.
 coinButtonsContainer.addEventListener('click', async (e) => {
   const btn = e.target.closest('button.place-coin');
   if(!btn) return;
@@ -412,7 +377,7 @@ async function placeCoinTransaction(coin){
   }
 }
 
-// --- Room creation & join handlers (ensure we store timestamps)
+// --- Room creation & join handlers (now store creator when creating a room)
 createRoomBtn.addEventListener('click', async () => {
   const role = roleSelect.value;
   const coinCount = coinCountSelect ? Number(coinCountSelect.value) : 5;
@@ -423,6 +388,7 @@ createRoomBtn.addEventListener('click', async () => {
 
   const room = {
     createdAt: Date.now(),
+    creator: uid,             // NEW: record the room opener
     presenter: null,
     placer: null,
     presenterJoinedAt: null,
@@ -463,7 +429,6 @@ leaveRoomBtn.addEventListener('click', async () => {
       updates['placer'] = null;
       updates['placerJoinedAt'] = null;
     }
-    // write back only changed fields to avoid overwriting state
     await set(ref(db, `rooms/${currentRoomId}`), Object.assign(room, updates));
   }
   detachRoomListener();
@@ -481,23 +446,19 @@ async function joinRoom(roomId, roleHint = null){
   const snap = await get(rRef);
   if(!snap.exists()) throw new Error('Room not found');
   const room = snap.val();
-  // If both slots full and we aren't already in it, refuse
   if(room.presenter && room.placer && room.presenter !== uid && room.placer !== uid){
     throw new Error('Room already has two players');
   }
-  // if not present, try to occupy preferred role or the empty one
   let roleAssigned = null;
   if(room.presenter === uid) roleAssigned = 'presenter';
   if(room.placer === uid) roleAssigned = 'placer';
   if(!roleAssigned){
     if(roleHint && !room[roleHint]) {
-      // assign and set joinedAt
       room[roleHint] = uid;
       if(roleHint === 'presenter') room.presenterJoinedAt = Date.now();
       if(roleHint === 'placer') room.placerJoinedAt = Date.now();
       roleAssigned = roleHint;
     } else {
-      // take any empty
       if(!room.presenter){
         room.presenter = uid; room.presenterJoinedAt = Date.now(); roleAssigned = 'presenter';
       } else if(!room.placer){
@@ -506,7 +467,6 @@ async function joinRoom(roomId, roleHint = null){
         throw new Error('No role available');
       }
     }
-    // write back assignment
     await set(rRef, room);
   }
 
@@ -522,7 +482,6 @@ async function joinRoom(roomId, roleHint = null){
   attachRoomListener(roomId);
 }
 
-// detach listener when leaving or switching room
 function detachRoomListener(){
   if(!roomRef) return;
   isListening = false;
@@ -538,12 +497,11 @@ function detachRoomListener(){
   });
 }
 
-// attach listener and keep updating UI
 function attachRoomListener(roomId){
   if(isListening) return;
   const rRef = ref(db, `rooms/${roomId}`);
   onValue(rRef, snap => {
-    if(!snap.exists()) {
+    if(!snap.exists()){
       infoEl.textContent = 'Room deleted';
       return;
     }
@@ -555,8 +513,7 @@ function attachRoomListener(roomId){
     else if(room.placer === uid) localRole = 'placer';
     else localRole = null;
     localRoleLabel.textContent = `You: ${localRole || 'spectator'}`;
-    // if state missing, initialize (use room.state.coinCount if present or default 5 and room.state.compensation)
-    if(!room.state) {
+    if(!room.state){
       const coinCount = (room.state && room.state.coinCount) ? room.state.coinCount : (room.coinCount || 5);
       const compensation = (room.state && room.state.compensation) ? room.state.compensation : (room.compensation || 2);
       set(ref(db, `rooms/${roomId}/state`), initialState(coinCount, compensation));
@@ -565,6 +522,33 @@ function attachRoomListener(roomId){
     renderState(room.state);
   });
   isListening = true;
+}
+
+// Helper to determine guest role using room.creator (fall back to timestamps if missing)
+function determineGuestRole(room){
+  if(!room) return 'placer';
+  if(room.creator){
+    // If creator equals presenter, the guest is placer, and vice versa.
+    if(room.presenter && room.placer){
+      if(room.creator === room.presenter) return 'placer';
+      if(room.creator === room.placer) return 'presenter';
+      // Creator exists but is neither current presenter nor placer -- fall back to timestamps below
+    } else {
+      // Only one assigned: guest not yet present; treat guest as the other role that will join later.
+      // For message composition when finished we expect both present, so fallback to placer.
+      return 'placer';
+    }
+  }
+
+  // Fallback: use timestamps if available
+  const pAt = room.presenterJoinedAt || 0;
+  const plAt = room.placerJoinedAt || 0;
+  if(pAt && plAt){
+    return (pAt > plAt) ? 'presenter' : 'placer';
+  }
+  if(!pAt && plAt) return 'placer';
+  if(pAt && !plAt) return 'presenter';
+  return 'placer';
 }
 
 // --- renderState
@@ -670,32 +654,16 @@ function renderState(state){
     if(s1 > s2WithComp) winnerSide = 'placer';
     else if(s1 === s2WithComp) winnerSide = 'draw';
 
-    // Determine which role is the guest (the second person to join)
-    // Use presenterJoinedAt and placerJoinedAt recorded on the room object (roomData)
-    let guestRole = null; // 'presenter'|'placer'|null
-    if(roomData){
-      const pAt = roomData.presenterJoinedAt || 0;
-      const plAt = roomData.placerJoinedAt || 0;
-      if(pAt && plAt){
-        guestRole = (pAt > plAt) ? 'presenter' : (plAt > pAt ? 'placer' : 'placer'); // tie fallback to placer
-      } else if(!pAt && plAt){
-        guestRole = 'placer';
-      } else if(pAt && !plAt){
-        guestRole = 'presenter';
-      } else {
-        // no timestamps -> fallback: consider guest = placer (common case)
-        guestRole = 'placer';
-      }
-    } else {
-      guestRole = 'placer';
-    }
+    // Determine guest role using creator/uid logic
+    const guestRole = determineGuestRole(roomData);
 
-    // Map guestScore and opponentScore
+    // Map guestScore and opponentScore based on known rule:
+    // placer gets the top basket (s1), presenter gets the other (s2), then compensation applied to second-highest
     let guestScore, opponentScore;
     if(guestRole === 'placer'){
-      guestScore = s1; // placer gets top basket
+      guestScore = s1;
       opponentScore = s2WithComp;
-    } else { // guestRole === 'presenter'
+    } else {
       guestScore = s2WithComp;
       opponentScore = s1;
     }
@@ -784,7 +752,6 @@ setInterval(async () => {
   roomInfo.hidden = true;
   resultEl.hidden = true;
   ensureLobbyControls();
-  // clear any highlight on first load
   basketEls.forEach(el => {
     el.classList.remove('offered');
     el.style.boxShadow = '';
