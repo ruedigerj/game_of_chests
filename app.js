@@ -331,8 +331,8 @@ async function placeCoinTransaction(coin){
 // --- Room creation/joining
 createRoomBtn.addEventListener('click', async () => {
   const role = roleSelect.value;
-  const coinCount = coinCountSelect ? Number(coinCountSelect.value) : 4;
-  const compensation = compSelect ? Number(compSelect.value) : 0;
+  const coinCount = coinCountSelect ? Number(coinCountSelect.value) : 5;
+  const compensation = compSelect ? Number(compSelect.value) : 2;
   // push new room to /rooms to get unique key
   const roomsRef = ref(db, 'rooms');
   const newRoomRef = push(roomsRef);
