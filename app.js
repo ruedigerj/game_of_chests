@@ -1,7 +1,9 @@
 // Multiplayer Game of Chests using Firebase Realtime Database + Anonymous Auth
 // Extended: support n coins (4 <= n <= 10), a compensation value (0 <= c <= 10),
-// and a Refresh button that reloads coinCount, compensation and role from the room.
-// The Refresh button is disabled during an active game (when phase is 'offering' or 'placing').
+// and a Refresh button that reloads coinCount, compensation and role from the room (resets game).
+// This version adds visual highlighting for the currently offered basket so the placer
+// can quickly see which basket is offered.
+//
 // Put this file alongside index.html and styles.css and serve as described earlier.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
@@ -65,6 +67,9 @@ const placerPrompt = document.getElementById('placer-prompt');
 const resultEl = document.getElementById('result');
 const resultText = document.getElementById('result-text');
 const newGameBtn = document.getElementById('newGame');
+
+// Grab the basket container elements so we can highlight the offered one
+const basketEls = Array.from(document.querySelectorAll('.basket'));
 
 // --- Local state
 let uid = null;
@@ -202,7 +207,7 @@ async function handleRefreshClick(){
 
     // If the room is in an active game, do not allow refresh (safety check)
     const phase = (state.phase || 'waiting');
-    //if(phase === 'offering' || phase === 'placing'){
+    // only block if placing (you can adjust to also block offering)
     if(phase === 'placing'){
       alert('Cannot refresh while a game is active. Wait until the round ends.');
       return;
@@ -430,6 +435,13 @@ function detachRoomListener(){
   // clear coin UI
   coinsContainer.innerHTML = '';
   coinButtonsContainer.innerHTML = '';
+  // clear any basket highlight
+  basketEls.forEach(el => {
+    el.classList.remove('offered');
+    el.style.boxShadow = '';
+    el.style.borderColor = '';
+    el.style.background = '';
+  });
 }
 
 // attach listener and keep updating UI
@@ -507,11 +519,37 @@ function renderState(state){
     Array.from(coinButtonsContainer.querySelectorAll('button.place-coin')).forEach(btn => btn.disabled = true);
     placerPrompt.textContent = 'Waiting for basket offer...';
     resultEl.hidden = true;
+
+    // ensure no highlight while waiting
+    basketEls.forEach(el => {
+      el.classList.remove('offered');
+      el.style.boxShadow = '';
+      el.style.borderColor = '';
+      el.style.background = '';
+    });
+
     return;
   }
 
   // normalize currentOffered
   const offered = state.currentOffered ?? null;
+
+  // Highlight the offered basket (visual aid for the placer)
+  // We apply a subtle blue glow and stronger border to the offered basket, clear on others.
+  basketEls.forEach((el, i) => {
+    if(offered === i){
+      el.classList.add('offered');
+      el.style.boxShadow = '0 0 0 4px rgba(37,99,235,0.08)';
+      el.style.borderColor = '#2563eb';
+      // slight background tint for clarity
+      el.style.background = '#f1f8ff';
+    } else {
+      el.classList.remove('offered');
+      el.style.boxShadow = '';
+      el.style.borderColor = '';
+      el.style.background = '';
+    }
+  });
 
   if(phase === 'offering'){
     infoEl.textContent = `Presenter's turn — offer a basket (turn ${state.turn+1}/${state.coinCount || 4})`;
@@ -641,4 +679,11 @@ setInterval(async () => {
   roomInfo.hidden = true;
   resultEl.hidden = true;
   ensureLobbyControls();
+  // clear any highlight on first load
+  basketEls.forEach(el => {
+    el.classList.remove('offered');
+    el.style.boxShadow = '';
+    el.style.borderColor = '';
+    el.style.background = '';
+  });
 })();
