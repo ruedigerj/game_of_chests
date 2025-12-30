@@ -1,5 +1,8 @@
 // Multiplayer Game of Chests using Firebase Realtime Database + Anonymous Auth
-// Defaults updated: coinCount default = 5, compensation default = 2.
+// Defaults: coinCount = 5, compensation = 2.
+// Updated: Refresh automatically force-takes the selected role if occupied by another player.
+// When clicking Refresh you already signal intent to apply the change, so no confirmation is asked.
+//
 // Put this file alongside index.html and styles.css and serve as described earlier.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
@@ -10,7 +13,7 @@ import {
   getAuth, signInAnonymously, onAuthStateChanged, signOut
 } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
 
-/* Firebase setup reminders omitted for brevity (same as before) */
+/* Firebase setup reminders omitted for brevity */
 
 const firebaseConfig = {
   apiKey: "AIzaSyBgYWbZN1iwDQEJQMWUf6MmzLtvF5U5EbI",
@@ -26,7 +29,7 @@ const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 const auth = getAuth(app);
 
-// --- DOM elements (same selectors as before)
+// --- DOM elements
 const authStatus = document.getElementById('auth-status');
 const createRoomBtn = document.getElementById('createRoom');
 const joinRoomBtn = document.getElementById('joinRoom');
@@ -76,8 +79,7 @@ let coinCountSelect = null;
 let compSelect = null;
 let refreshBtn = null;
 
-// Default initial game state factory
-// Defaults changed to coinCount = 5 and compensation = 2
+// Default initial game state factory (defaults: coinCount=5, compensation=2)
 function initialState(coinCount = 5, compensation = 2){
   const remaining = [];
   for(let i=1;i<=coinCount;i++) remaining.push(i);
@@ -129,8 +131,7 @@ function ensureLobbyControls(){
     opt.textContent = String(n);
     select.appendChild(opt);
   }
-  // default UI shows 5 now
-  select.value = '5';
+  select.value = '5'; // default UI value
   ccWrapper.appendChild(select);
 
   // compensation
@@ -147,8 +148,7 @@ function ensureLobbyControls(){
     opt.textContent = String(c);
     cselect.appendChild(opt);
   }
-  // default UI shows 2 now
-  cselect.value = '2';
+  cselect.value = '2'; // default UI value
   compWrapper.appendChild(cselect);
 
   // refresh button
@@ -159,7 +159,7 @@ function ensureLobbyControls(){
   const rbtn = document.createElement('button');
   rbtn.id = 'refreshBtn';
   rbtn.textContent = 'Refresh';
-  rbtn.title = 'Reset game using selected coinCount/comp and assign you to chosen role (if free)';
+  rbtn.title = 'Reset game using selected coinCount/comp and assign you to chosen role (force-take if occupied)';
   rbtn.style.padding = '6px 10px';
   rbtn.disabled = false;
   rWrapper.appendChild(rbtn);
@@ -179,7 +179,10 @@ function ensureLobbyControls(){
 }
 ensureLobbyControls();
 
-// --- Refresh logic
+// Helper to display short id in messages
+function shortId(u){ return u ? u.slice(0,8) : '—'; }
+
+// --- Refresh logic (automatic force-take)
 async function handleRefreshClick(){
   if(!currentRoomId){
     if(localRole) roleSelect.value = localRole;
@@ -212,31 +215,33 @@ async function handleRefreshClick(){
   const selectedComp = compSelect ? Number(compSelect.value) : ((state.compensation === undefined || state.compensation === null) ? 2 : state.compensation);
   const selectedRole = roleSelect ? roleSelect.value : null; // 'presenter'|'placer' or null
 
+  // Automatic force-take: if the slot is occupied by another user, we proceed and overwrite it
+  // (user intent is signaled by clicking Refresh).
+  const forceTakePresenter = (selectedRole === 'presenter' && room.presenter && room.presenter !== uid);
+  const forceTakePlacer = (selectedRole === 'placer' && room.placer && room.placer !== uid);
+
   const newState = initialState(selectedCoinCount, selectedComp);
   newState.phase = (room.presenter && room.placer) ? 'offering' : 'waiting';
 
   try {
-    await runTransaction(ref(db, `rooms/${currentRoomId}`), cur => {
+    await runTransaction(roomRefPath, cur => {
       if(cur == null) return cur;
       const curPhase = (cur.state && cur.state.phase) ? cur.state.phase : 'waiting';
       if(curPhase === 'offering' || curPhase === 'placing') {
         throw new Error('Active round detected on server; aborting refresh.');
       }
 
+      // Role assignment logic (force-take automatically)
       if(selectedRole === 'presenter') {
-        if(cur.presenter && cur.presenter !== uid) {
-          throw new Error('Presenter slot already taken by another player.');
-        }
+        // if someone else is presenter, overwrite them (force-take)
         cur.presenter = uid;
         if(cur.placer === uid) cur.placer = null;
       } else if(selectedRole === 'placer') {
-        if(cur.placer && cur.placer !== uid) {
-          throw new Error('Placer slot already taken by another player.');
-        }
         cur.placer = uid;
         if(cur.presenter === uid) cur.presenter = null;
       }
 
+      // Set the restarted state
       cur.state = newState;
       return cur;
     });
@@ -246,6 +251,7 @@ async function handleRefreshClick(){
     return;
   }
 
+  // Update UI locally and confirm
   renderCoinControls(selectedCoinCount, newState.remaining);
   try {
     const snap2 = await get(roomRefPath);
@@ -280,7 +286,7 @@ function renderCoinControls(coinCount, remaining){
     btn.className = 'place-coin';
     btn.dataset.value = String(v);
     btn.textContent = `Place ${v}`;
-    btn.disabled = true; // renderState will enable as needed
+    btn.disabled = true;
     coinButtonsContainer.appendChild(btn);
   }
 }
@@ -423,8 +429,6 @@ async function joinRoom(roomId, roleHint = null){
   attachRoomListener(roomId);
 }
 
-function shortId(u){ return u ? u.slice(0,8) : '—'; }
-
 function detachRoomListener(){
   if(!roomRef) return;
   isListening = false;
@@ -467,7 +471,7 @@ function attachRoomListener(roomId){
   isListening = true;
 }
 
-// --- renderState (adds highlight and disables refresh during active round)
+// --- renderState
 function renderState(state){
   const coinCount = state.coinCount || 5;
   const compensation = (state.compensation === undefined || state.compensation === null) ? 2 : state.compensation;
