@@ -555,11 +555,11 @@ function renderState(state){
     // - if s1 == s2WithComp -> draw
     // - if s1 < s2WithComp -> placer loses (presenter wins)
     if(s1 > s2WithComp) {
-      resultText.textContent = `Placer wins — top ${s1} vs second+comp ${s2WithComp} (comp ${comp})`;
+      resultText.textContent = `Placer wins — ${s1} : ${s2WithComp}`;
     } else if (s1 === s2WithComp) {
-      resultText.textContent = `Draw — top ${s1} equals second+comp ${s2WithComp} (comp ${comp})`;
+      resultText.textContent = `Draw — ${s1} : ${s2WithComp}`;
     } else {
-      resultText.textContent = `Placer loses — top ${s1} vs second+comp ${s2WithComp} (comp ${comp})`;
+      resultText.textContent = `Placer loses — ${s1} : ${s2WithComp}`;
     }
 
     resultEl.hidden = false;
