@@ -1,8 +1,8 @@
 // Multiplayer Game of Chests using Firebase Realtime Database + Anonymous Auth
 // Extended: support n coins (4 <= n <= 10), a compensation value (0 <= c <= 10),
-// and a Refresh button that reloads coinCount, compensation and role from the room (resets game).
-// This version adds visual highlighting for the currently offered basket so the placer
-// can quickly see which basket is offered.
+// Refresh button resets game state and can also assign you to a role (presenter/placer).
+// Refresh now atomically updates the room state and assigns the selected role (if slot free).
+// The Refresh button is disabled while a round is active (offering or placing).
 //
 // Put this file alongside index.html and styles.css and serve as described earlier.
 
@@ -14,11 +14,7 @@ import {
   getAuth, signInAnonymously, onAuthStateChanged, signOut
 } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
 
-/*
-  Firebase setup reminders:
-  1) In the Firebase console enable Authentication -> Anonymous.
-  2) Create a Realtime Database and set rules (for testing you can allow authenticated users).
-*/
+/* Firebase setup reminders omitted for brevity (same as before) */
 
 const firebaseConfig = {
   apiKey: "AIzaSyBgYWbZN1iwDQEJQMWUf6MmzLtvF5U5EbI",
@@ -34,7 +30,7 @@ const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 const auth = getAuth(app);
 
-// --- DOM elements
+// --- DOM elements (same selectors as before)
 const authStatus = document.getElementById('auth-status');
 const createRoomBtn = document.getElementById('createRoom');
 const joinRoomBtn = document.getElementById('joinRoom');
@@ -68,7 +64,7 @@ const resultEl = document.getElementById('result');
 const resultText = document.getElementById('result-text');
 const newGameBtn = document.getElementById('newGame');
 
-// Grab the basket container elements so we can highlight the offered one
+// Grab the basket container elements for highlighting
 const basketEls = Array.from(document.querySelectorAll('.basket'));
 
 // --- Local state
@@ -84,8 +80,8 @@ let coinCountSelect = null;
 let compSelect = null;
 let refreshBtn = null;
 
-// Default initial game state factory -> accepts coinCount and compensation
-function initialState(coinCount = 5, compensation = 2){
+// Default initial game state factory
+function initialState(coinCount = 4, compensation = 0){
   const remaining = [];
   for(let i=1;i<=coinCount;i++) remaining.push(i);
   return {
@@ -94,35 +90,35 @@ function initialState(coinCount = 5, compensation = 2){
     remaining,
     turn: 0,
     currentOffered: null,
-    phase: 'waiting', // waiting -> offering -> placing -> finished
+    phase: 'waiting',
     moves: [],
     coinCount: coinCount,
     compensation: compensation
   };
 }
 
-// Sign in anonymously
+// Auth
 signInAnonymously(auth).catch(err => {
   console.error('Auth error', err);
-  authStatus.textContent = 'Auth error: ' + err.message;
+  if(authStatus) authStatus.textContent = 'Auth error: ' + err.message;
 });
 onAuthStateChanged(auth, user => {
   if(user){
     uid = user.uid;
-    authStatus.textContent = `Signed in (uid: ${uid.slice(0,8)})`;
+    if(authStatus) authStatus.textContent = `Signed in (uid: ${uid.slice(0,8)})`;
   } else {
     uid = null;
-    authStatus.textContent = 'Signed out';
+    if(authStatus) authStatus.textContent = 'Signed out';
   }
 });
 
-// --- Inject coin-count, compensation selectors and Refresh button into the lobby (if not present)
+// --- Inject lobby controls (coinCount, compensation, refresh)
 function ensureLobbyControls(){
   if(coinCountSelect && compSelect && refreshBtn) return;
   const lobbyControls = document.getElementById('lobby-controls');
   if(!lobbyControls) return;
 
-  // coin count control
+  // coin count
   const ccWrapper = document.createElement('div');
   ccWrapper.style.display = 'flex';
   ccWrapper.style.gap = '8px';
@@ -139,7 +135,7 @@ function ensureLobbyControls(){
   select.value = '4';
   ccWrapper.appendChild(select);
 
-  // compensation control
+  // compensation
   const compWrapper = document.createElement('div');
   compWrapper.style.display = 'flex';
   compWrapper.style.gap = '8px';
@@ -164,12 +160,12 @@ function ensureLobbyControls(){
   const rbtn = document.createElement('button');
   rbtn.id = 'refreshBtn';
   rbtn.textContent = 'Refresh';
-  rbtn.title = 'Reload coin count, compensation and role from the current room (resets game)';
+  rbtn.title = 'Reset game using selected coinCount/comp and assign you to chosen role (if free)';
   rbtn.style.padding = '6px 10px';
   rbtn.disabled = false;
   rWrapper.appendChild(rbtn);
 
-  // Insert controls before the Create Room button
+  // Insert before createRoomBtn
   lobbyControls.insertBefore(ccWrapper, createRoomBtn);
   lobbyControls.insertBefore(compWrapper, createRoomBtn);
   lobbyControls.insertBefore(rWrapper, createRoomBtn);
@@ -178,70 +174,118 @@ function ensureLobbyControls(){
   compSelect = cselect;
   refreshBtn = rbtn;
 
-  // refresh click handler
   refreshBtn.addEventListener('click', async () => {
     await handleRefreshClick();
   });
 }
 ensureLobbyControls();
 
-// --- Refresh logic: fetch room data and update coinCount, compensation and roleSelect UI
-// Updated: will now reset the room.state to the selected coinCount & compensation (restart the game)
-// unless the game is active (offering/placing) — in that case refresh is prevented.
+// --- Refresh logic
+// New behavior:
+// - If not in a room: just update local UI
+// - If in a room and no active round (phase not offering/placing), perform a runTransaction on the room:
+//    * assign the selected role to the current user if the slot is free (do NOT overwrite another user)
+//    * set room.state to the new initial state (coinCount, compensation)
+// This ensures role + state are updated atomically.
 async function handleRefreshClick(){
-  // If not in a room, just update local UI and return
   if(!currentRoomId){
     if(localRole) roleSelect.value = localRole;
     alert('Not in a room — local UI updated.');
     return;
   }
 
-  try{
-    const snap = await get(ref(db, `rooms/${currentRoomId}`));
-    if(!snap.exists()){
-      alert('Room not found on server.');
-      return;
-    }
-    const room = snap.val();
-    const state = room.state || {};
+  const roomRefPath = ref(db, `rooms/${currentRoomId}`);
+  // read current room snapshot to check phase quickly
+  let snap;
+  try {
+    snap = await get(roomRefPath);
+  } catch(e){
+    console.error('Failed to read room', e);
+    alert('Refresh failed: could not read room');
+    return;
+  }
+  if(!snap.exists()){
+    alert('Room not found on server.');
+    return;
+  }
+  const room = snap.val();
+  const state = room.state || {};
+  const phase = state.phase || 'waiting';
+  // block if a round is active (offering or placing)
+  if(phase === 'offering' || phase === 'placing'){
+    alert('Cannot refresh while a round is active. Wait until the round ends.');
+    return;
+  }
 
-    // If the room is in an active game, do not allow refresh (safety check)
-    const phase = (state.phase || 'waiting');
-    // only block if placing (you can adjust to also block offering)
-    if(phase === 'placing'){
-      alert('Cannot refresh while a game is active. Wait until the round ends.');
-      return;
-    }
+  // parse selected values from the UI (these are what we will apply)
+  const selectedCoinCount = coinCountSelect ? Number(coinCountSelect.value) : (state.coinCount || 4);
+  const selectedComp = compSelect ? Number(compSelect.value) : ((state.compensation === undefined || state.compensation === null) ? 0 : state.compensation);
+  const selectedRole = roleSelect ? roleSelect.value : null; // 'presenter'|'placer' or null
 
-    // Read selected values from the UI (use selected values, not the room values)
-    const selectedCoinCount = coinCountSelect ? Number(coinCountSelect.value) : (state.coinCount || 4);
-    const selectedComp = compSelect ? Number(compSelect.value) : ((state.compensation === undefined || state.compensation === null) ? 0 : state.compensation);
+  const newState = initialState(selectedCoinCount, selectedComp);
+  // If both players are present we start offering immediately, otherwise waiting.
+  newState.phase = (room.presenter && room.placer) ? 'offering' : 'waiting';
 
-    // Build new initial state with selected values
-    const newState = initialState(selectedCoinCount, selectedComp);
-    // If both players are already present, start offering immediately
-    if(room.presenter && room.placer){
-      newState.phase = 'offering';
-    } else {
-      newState.phase = 'waiting';
-    }
+  // apply atomically with runTransaction on the room node:
+  try {
+    await runTransaction(roomRefPath, cur => {
+      if(cur == null) return cur;
+      // re-check phase server-side: ensure we don't clobber an active round
+      const curPhase = (cur.state && cur.state.phase) ? cur.state.phase : 'waiting';
+      if(curPhase === 'offering' || curPhase === 'placing') {
+        // abort transaction by throwing; caller will catch and inform user
+        throw new Error('Active round detected on server; aborting refresh.');
+      }
 
-    // Write the new state to the DB (this restarts the game for everyone)
-    await set(ref(db, `rooms/${currentRoomId}/state`), newState);
-
-    // Update local UI immediately to reflect the change
-    renderCoinControls(selectedCoinCount, newState.remaining);
-    if(room.presenter === uid) roleSelect.value = 'presenter';
-    else if(room.placer === uid) roleSelect.value = 'placer';
-
-    alert(`Room reset: coinCount=${selectedCoinCount}, compensation=${selectedComp}`);
-  }catch(err){
-    console.error('Refresh failed', err);
+      // Role assignment logic:
+      // If user selected a role, try to take it if free or already theirs.
+      if(selectedRole === 'presenter') {
+        if(cur.presenter && cur.presenter !== uid) {
+          // slot taken by someone else -> abort
+          throw new Error('Presenter slot already taken by another player.');
+        }
+        // assign current user as presenter
+        cur.presenter = uid;
+        // if the user previously was placer, remove that assignment to avoid occupying both
+        if(cur.placer === uid) cur.placer = null;
+      } else if(selectedRole === 'placer') {
+        if(cur.placer && cur.placer !== uid) {
+          throw new Error('Placer slot already taken by another player.');
+        }
+        cur.placer = uid;
+        if(cur.presenter === uid) cur.presenter = null;
+      }
+      // Now set the new state (restart game)
+      cur.state = newState;
+      return cur;
+    });
+  } catch(err) {
+    console.error('Refresh transaction failed', err);
     alert('Refresh failed: ' + (err.message || err));
+    return;
+  }
+
+  // Update local UI immediately
+  renderCoinControls(selectedCoinCount, newState.remaining);
+  // Update roleSelect to reflect what we actually set (re-read room to be safe)
+  try {
+    const snap2 = await get(roomRefPath);
+    if(snap2.exists()){
+      const updated = snap2.val();
+      if(updated.presenter === uid) roleSelect.value = 'presenter';
+      else if(updated.placer === uid) roleSelect.value = 'placer';
+      // show confirmation
+      alert(`Room reset: coinCount=${selectedCoinCount}, compensation=${selectedComp}`);
+    } else {
+      alert('Room updated but could not read confirmation.');
+    }
+  } catch(e){
+    console.warn('Refresh post-read failed', e);
+    alert('Room reset but failed to verify.');
   }
 }
 
-// --- Helpers to render coin controls dynamically (coins and buttons)
+// --- Helpers: render coin controls
 function renderCoinControls(coinCount, remaining){
   coinsContainer.innerHTML = '';
   coinButtonsContainer.innerHTML = '';
@@ -258,12 +302,12 @@ function renderCoinControls(coinCount, remaining){
     btn.className = 'place-coin';
     btn.dataset.value = String(v);
     btn.textContent = `Place ${v}`;
-    btn.disabled = true; // initial; renderState will enable as needed
+    btn.disabled = true; // renderState will enable as needed
     coinButtonsContainer.appendChild(btn);
   }
 }
 
-// place-coin handler using event delegation
+// --- Place coin (transaction)
 coinButtonsContainer.addEventListener('click', async (e) => {
   const btn = e.target.closest('button.place-coin');
   if(!btn) return;
@@ -272,33 +316,22 @@ coinButtonsContainer.addEventListener('click', async (e) => {
   await placeCoinTransaction(coin);
 });
 
-// place coin transaction (reused)
 async function placeCoinTransaction(coin){
   const stateRef = ref(db, `rooms/${currentRoomId}/state`);
   try{
     await runTransaction(stateRef, cur => {
       if(cur == null) return cur;
-      // normalize currentOffered: treat undefined or nullish as null
       const curOff = (cur.currentOffered === undefined || cur.currentOffered === null) ? null : cur.currentOffered;
-      if(curOff === null){
-        throw new Error('No basket offered');
-      }
-      if((roomData && roomData.placer) !== uid){
-        throw new Error('Not the placer');
-      }
-      if(!cur.remaining || !cur.remaining.includes(coin)){
-        throw new Error('Coin not available');
-      }
+      if(curOff === null) throw new Error('No basket offered');
+      if((roomData && roomData.placer) !== uid) throw new Error('Not the placer');
+      if(!cur.remaining || !cur.remaining.includes(coin)) throw new Error('Coin not available');
       const idx = curOff;
-      // place coin
       cur.baskets = cur.baskets || [[],[],[]];
       cur.baskets[idx] = cur.baskets[idx] || [];
       cur.baskets[idx].push(coin);
       cur.sums = cur.sums || [0,0,0];
       cur.sums[idx] = (cur.sums[idx] || 0) + coin;
-      // remove coin
       cur.remaining = cur.remaining.filter(c => c !== coin);
-      // record move
       cur.moves = cur.moves || [];
       cur.moves.push({
         turn: cur.turn + 1,
@@ -310,12 +343,8 @@ async function placeCoinTransaction(coin){
       });
       cur.turn = (cur.turn || 0) + 1;
       cur.currentOffered = null;
-      // if finished: use cur.coinCount (fallback 4)
-      if(cur.turn >= (cur.coinCount || 4)){
-        cur.phase = 'finished';
-      } else {
-        cur.phase = 'offering';
-      }
+      if(cur.turn >= (cur.coinCount || 4)) cur.phase = 'finished';
+      else cur.phase = 'offering';
       return cur;
     });
   }catch(err){
@@ -328,12 +357,11 @@ async function placeCoinTransaction(coin){
   }
 }
 
-// --- Room creation/joining
+// --- Room creation & join handlers (unchanged except small safety)
 createRoomBtn.addEventListener('click', async () => {
   const role = roleSelect.value;
-  const coinCount = coinCountSelect ? Number(coinCountSelect.value) : 5;
-  const compensation = compSelect ? Number(compSelect.value) : 2;
-  // push new room to /rooms to get unique key
+  const coinCount = coinCountSelect ? Number(coinCountSelect.value) : 4;
+  const compensation = compSelect ? Number(compSelect.value) : 0;
   const roomsRef = ref(db, 'rooms');
   const newRoomRef = push(roomsRef);
   const rid = newRoomRef.key;
@@ -359,7 +387,6 @@ joinRoomBtn.addEventListener('click', async () => {
 
 leaveRoomBtn.addEventListener('click', async () => {
   if(!currentRoomId) return;
-  // remove role assignment if we occupy it
   const rRef = ref(db, `rooms/${currentRoomId}`);
   const snap = await get(rRef);
   if(snap.exists()){
@@ -375,20 +402,18 @@ leaveRoomBtn.addEventListener('click', async () => {
   localRole = null;
   roomInfo.hidden = true;
   boardSection.hidden = true;
-  authStatus.textContent = `Signed in (uid: ${uid.slice(0,8)})`;
+  if(authStatus) authStatus.textContent = `Signed in (uid: ${uid ? uid.slice(0,8) : ''})`;
 });
 
-// joinRoom: attempt to join existing room; if roleHint provided try to take that role
+// --- joinRoom / attach listener (mostly unchanged)
 async function joinRoom(roomId, roleHint = null){
   const rRef = ref(db, `rooms/${roomId}`);
   const snap = await get(rRef);
   if(!snap.exists()) throw new Error('Room not found');
   const room = snap.val();
-  // If both slots full and we aren't already in it, refuse
   if(room.presenter && room.placer && room.presenter !== uid && room.placer !== uid){
     throw new Error('Room already has two players');
   }
-  // if not present, try to occupy preferred role or the empty one
   let roleAssigned = null;
   if(room.presenter === uid) roleAssigned = 'presenter';
   if(room.placer === uid) roleAssigned = 'placer';
@@ -397,17 +422,14 @@ async function joinRoom(roomId, roleHint = null){
       room[roleHint] = uid;
       roleAssigned = roleHint;
     } else {
-      // take any empty
       if(!room.presenter){
         room.presenter = uid; roleAssigned = 'presenter';
       } else if(!room.placer){
         room.placer = uid; roleAssigned = 'placer';
       } else {
-        // shouldn't get here because we checked above, but guard
         throw new Error('No role available');
       }
     }
-    // write back assignment
     await set(rRef, room);
   }
 
@@ -423,19 +445,16 @@ async function joinRoom(roomId, roleHint = null){
   attachRoomListener(roomId);
 }
 
-// helper: short id display
 function shortId(u){ return u ? u.slice(0,8) : '—'; }
 
-// detach listener when leaving or switching room
 function detachRoomListener(){
   if(!roomRef) return;
   isListening = false;
   roomData = null;
   movesList.innerHTML = '';
-  // clear coin UI
   coinsContainer.innerHTML = '';
   coinButtonsContainer.innerHTML = '';
-  // clear any basket highlight
+  // clear highlights
   basketEls.forEach(el => {
     el.classList.remove('offered');
     el.style.boxShadow = '';
@@ -444,12 +463,11 @@ function detachRoomListener(){
   });
 }
 
-// attach listener and keep updating UI
 function attachRoomListener(roomId){
   if(isListening) return;
   const rRef = ref(db, `rooms/${roomId}`);
   onValue(rRef, snap => {
-    if(!snap.exists()) {
+    if(!snap.exists()){
       infoEl.textContent = 'Room deleted';
       return;
     }
@@ -461,8 +479,7 @@ function attachRoomListener(roomId){
     else if(room.placer === uid) localRole = 'placer';
     else localRole = null;
     localRoleLabel.textContent = `You: ${localRole || 'spectator'}`;
-    // if state missing, initialize (use room.state.coinCount if present or default 4 and room.state.compensation)
-    if(!room.state) {
+    if(!room.state){
       const coinCount = (room.state && room.state.coinCount) ? room.state.coinCount : (room.coinCount || 4);
       const compensation = (room.state && room.state.compensation) ? room.state.compensation : (room.compensation || 0);
       set(ref(db, `rooms/${roomId}/state`), initialState(coinCount, compensation));
@@ -473,18 +490,15 @@ function attachRoomListener(roomId){
   isListening = true;
 }
 
-// UI rendering based on room.state
+// --- renderState (adds highlight and disables refresh during active round)
 function renderState(state){
-  // ensure coinCount & compensation controls reflect the room's values (don't overwrite while creating)
   const coinCount = state.coinCount || 4;
   const compensation = (state.compensation === undefined || state.compensation === null) ? 0 : state.compensation;
   if(coinCountSelect) coinCountSelect.value = String(coinCount);
   if(compSelect) compSelect.value = String(compensation);
 
-  // render coin controls for this coinCount
   renderCoinControls(coinCount, state.remaining);
 
-  // updates for baskets
   for(let i=0;i<3;i++){
     const arr = state.baskets && state.baskets[i] ? state.baskets[i] : [];
     basketContents[i].textContent = arr.length ? arr.join(', ') : '(empty)';
@@ -492,7 +506,6 @@ function renderState(state){
     basketSums[i].textContent = `Sum: ${s}`;
   }
 
-  // history
   movesList.innerHTML = '';
   if(state.moves && state.moves.length){
     state.moves.forEach(m => {
@@ -502,46 +515,38 @@ function renderState(state){
     });
   }
 
-  // control enabling depending on role and phase
   const phase = state.phase || 'waiting';
 
-  // Refresh button: disabled during a game (consider 'offering' and 'placing' as in-game)
+  // disable refresh while a round is active
   if(refreshBtn) {
-    //const inGame = (phase === 'offering' || phase === 'placing');
-    const inGame = (false);
+    const inGame = (phase === 'offering' || phase === 'placing');
     refreshBtn.disabled = inGame;
   }
 
   if(phase === 'waiting'){
     infoEl.textContent = 'Waiting for both players to join...';
     offers.forEach(b => b.disabled = true);
-    // disable coin buttons
     Array.from(coinButtonsContainer.querySelectorAll('button.place-coin')).forEach(btn => btn.disabled = true);
     placerPrompt.textContent = 'Waiting for basket offer...';
     resultEl.hidden = true;
-
-    // ensure no highlight while waiting
+    // clear highlight
     basketEls.forEach(el => {
       el.classList.remove('offered');
       el.style.boxShadow = '';
       el.style.borderColor = '';
       el.style.background = '';
     });
-
     return;
   }
 
-  // normalize currentOffered
   const offered = state.currentOffered ?? null;
 
-  // Highlight the offered basket (visual aid for the placer)
-  // We apply a subtle blue glow and stronger border to the offered basket, clear on others.
+  // highlight offered basket
   basketEls.forEach((el, i) => {
     if(offered === i){
       el.classList.add('offered');
       el.style.boxShadow = '0 0 0 4px rgba(37,99,235,0.08)';
       el.style.borderColor = '#2563eb';
-      // slight background tint for clarity
       el.style.background = '#f1f8ff';
     } else {
       el.classList.remove('offered');
@@ -559,13 +564,11 @@ function renderState(state){
     infoEl.textContent = 'Game in progress';
   }
 
-  // Presenter can offer only if it's their turn and no currentOffered
   offers.forEach(b => {
     const idx = Number(b.dataset.index);
     b.disabled = !(localRole === 'presenter' && offered === null && state.turn < (state.coinCount || 4));
   });
 
-  // Placer can place only if localRole is placer and currentOffered != null
   Array.from(coinButtonsContainer.querySelectorAll('button.place-coin')).forEach(btn => {
     const val = Number(btn.dataset.value);
     btn.disabled = !(localRole === 'placer' && offered !== null && state.remaining && state.remaining.includes(val));
@@ -578,20 +581,13 @@ function renderState(state){
   }
   resultEl.hidden = true;
 
-  // If finished, show result (apply compensation to the second-highest sum)
   if(phase === 'finished'){
     const sums = (state.sums || [0,0,0]).slice();
-    // sort descending while keeping values only (we don't need which basket belonged to whom)
     const sorted = sums.slice().sort((a,b)=>b-a);
     const s1 = sorted[0];
     const s2 = sorted[1];
     const comp = (state.compensation === undefined || state.compensation === null) ? 0 : Number(state.compensation);
     const s2WithComp = s2 + comp;
-
-    // Determine result:
-    // - if s1 > s2WithComp -> placer wins
-    // - if s1 == s2WithComp -> draw
-    // - if s1 < s2WithComp -> placer loses (presenter wins)
     if(s1 > s2WithComp) {
       resultText.textContent = `Placer wins — ${s1} : ${s2WithComp}`;
     } else if (s1 === s2WithComp) {
@@ -599,7 +595,6 @@ function renderState(state){
     } else {
       resultText.textContent = `Placer loses — ${s1} : ${s2WithComp}`;
     }
-
     resultEl.hidden = false;
     infoEl.textContent = 'Game over';
     offers.forEach(b => b.disabled = true);
@@ -608,7 +603,7 @@ function renderState(state){
   }
 }
 
-// --- Offer basket (presenter action)
+// --- Offer handler (transaction) unchanged
 offers.forEach(b => b.addEventListener('click', async (e) => {
   const idx = Number(e.currentTarget.dataset.index);
   if(!currentRoomId) return;
@@ -616,14 +611,11 @@ offers.forEach(b => b.addEventListener('click', async (e) => {
   try{
     await runTransaction(stateRef, cur => {
       if(cur == null) return cur;
-      // only presenter may offer and there must be no currentOffered
       const room = roomData || {};
       if(room.presenter !== uid) {
         throw new Error('Not presenter');
       }
-      // normalize currentOffered: treat undefined or nullish as null
       const curOff = (cur.currentOffered === undefined || cur.currentOffered === null) ? null : cur.currentOffered;
-      // if there's a numeric offered index (0,1,2) then someone already offered
       if (curOff !== null && typeof curOff === 'number') {
         throw new Error('Already offered');
       }
@@ -644,25 +636,21 @@ offers.forEach(b => b.addEventListener('click', async (e) => {
   }
 }));
 
-// new game / reset (either player can request — in a real app you'd restrict)
+// --- Reset button handler (keeps previous semantics)
 newGameBtn.addEventListener('click', async () => {
   if(!currentRoomId) return;
   if(!confirm('Reset game to initial state?')) return;
-  // Decide coinCount & compensation to reset to: prefer room.state values or lobby selects
   const coinCount = (roomData && roomData.state && roomData.state.coinCount) ? roomData.state.coinCount : (coinCountSelect ? Number(coinCountSelect.value) : 4);
   const compensation = (roomData && roomData.state && (roomData.state.compensation !== undefined && roomData.state.compensation !== null)) ? Number(roomData.state.compensation) : (compSelect ? Number(compSelect.value) : 0);
   const sRef = ref(db, `rooms/${currentRoomId}/state`);
   await set(sRef, initialState(coinCount, compensation));
 });
 
-// Utility: short helper to show/hide and update UI when user refreshes
-// Periodically check if roomData.phase is missing and when both players present set phase to offering
+// --- Periodic check to move waiting -> offering when both players present
 setInterval(async () => {
   if(!currentRoomId || !roomData) return;
-  // if both players present and phase is waiting, set to offering
   if(roomData.presenter && roomData.placer && roomData.state && roomData.state.phase === 'waiting'){
     await set(ref(db, `rooms/${currentRoomId}/state/phase`), 'offering');
-    // ensure state object exists
     const sRef = ref(db, `rooms/${currentRoomId}/state`);
     const sSnap = await get(sRef);
     if(!sSnap.exists()){
@@ -673,7 +661,7 @@ setInterval(async () => {
   }
 }, 1000);
 
-// helper to show initial UI state on load
+// --- Init
 (function init(){
   boardSection.hidden = true;
   roomInfo.hidden = true;
