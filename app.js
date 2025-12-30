@@ -7,6 +7,8 @@
 // - "My guest loses G : O"
 // - "The game ended in a draw G : G"
 //
+// Added: play a short click sound each time a coin is placed.
+//
 // Put this file alongside index.html and styles.css and serve as described earlier.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
@@ -98,6 +100,46 @@ function initialState(coinCount = 5, compensation = 2){
     coinCount: coinCount,
     compensation: compensation
   };
+}
+
+// --- Click sound setup (Web Audio API)
+// We'll create a single AudioContext and play a short percussive click using an oscillator + gain envelope.
+// This avoids needing an external audio file.
+const audioCtx = (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
+  ? new (window.AudioContext || window.webkitAudioContext)()
+  : null;
+
+function playClick(){
+  if(!audioCtx) return;
+  try{
+    // Resume context if suspended (required on some browsers until user gesture)
+    if(audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(()=>{/* ignore */});
+    }
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    // Short high-frequency click
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1200, now);
+
+    // Envelope: quick attack, fast decay
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.001);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.07);
+
+    // Cleanup will happen automatically when node is garbage-collected; no references kept
+  }catch(err){
+    // swallow audio errors to avoid breaking game logic
+    console.warn('playClick error', err);
+  }
 }
 
 // Auth
@@ -312,6 +354,61 @@ function renderCoinControls(coinCount, remaining){
     btn.textContent = `Place ${v}`;
     btn.disabled = true;
     coinButtonsContainer.appendChild(btn);
+  }
+}
+
+// --- Place coin (transaction)
+// We play a click sound after a successful place transaction.
+coinButtonsContainer.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button.place-coin');
+  if(!btn) return;
+  const coin = Number(btn.dataset.value);
+  if(!currentRoomId) return;
+  await placeCoinTransaction(coin);
+});
+
+async function placeCoinTransaction(coin){
+  const stateRef = ref(db, `rooms/${currentRoomId}/state`);
+  try{
+    await runTransaction(stateRef, cur => {
+      if(cur == null) return cur;
+      const curOff = (cur.currentOffered === undefined || cur.currentOffered === null) ? null : cur.currentOffered;
+      if(curOff === null) throw new Error('No basket offered');
+      if((roomData && roomData.placer) !== uid) throw new Error('Not the placer');
+      if(!cur.remaining || !cur.remaining.includes(coin)) throw new Error('Coin not available');
+      const idx = curOff;
+      cur.baskets = cur.baskets || [[],[],[]];
+      cur.baskets[idx] = cur.baskets[idx] || [];
+      cur.baskets[idx].push(coin);
+      cur.sums = cur.sums || [0,0,0];
+      cur.sums[idx] = (cur.sums[idx] || 0) + coin;
+      cur.remaining = cur.remaining.filter(c => c !== coin);
+      cur.moves = cur.moves || [];
+      cur.moves.push({
+        turn: cur.turn + 1,
+        idx,
+        coin,
+        by: uid,
+        byShort: uid ? uid.slice(0,8) : null,
+        ts: Date.now()
+      });
+      cur.turn = (cur.turn || 0) + 1;
+      cur.currentOffered = null;
+      if(cur.turn >= (cur.coinCount || 5)) cur.phase = 'finished';
+      else cur.phase = 'offering';
+      return cur;
+    });
+
+    // transaction succeeded -> play click
+    playClick();
+
+  }catch(err){
+    console.warn('Place failed', err);
+    try {
+      const snap = await get(ref(db, `rooms/${currentRoomId}/state`));
+      console.info('State after failed place:', snap.val());
+    } catch(e){}
+    alert('Place failed: ' + (err.message || err));
   }
 }
 
