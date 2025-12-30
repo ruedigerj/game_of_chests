@@ -202,7 +202,8 @@ async function handleRefreshClick(){
 
     // If the room is in an active game, do not allow refresh (safety check)
     const phase = (state.phase || 'waiting');
-    if(phase === 'offering' || phase === 'placing'){
+    //if(phase === 'offering' || phase === 'placing'){
+    if(phase === 'placing'){
       alert('Cannot refresh while a game is active. Wait until the round ends.');
       return;
     }
