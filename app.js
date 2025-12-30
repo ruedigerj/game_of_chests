@@ -480,7 +480,8 @@ function renderState(state){
 
   // Refresh button: disabled during a game (consider 'offering' and 'placing' as in-game)
   if(refreshBtn) {
-    const inGame = (phase === 'offering' || phase === 'placing');
+    // const inGame = (phase === 'offering' || phase === 'placing');
+    const inGame = (phase === 'placing');
     refreshBtn.disabled = inGame;
   }
 
