@@ -9,9 +9,9 @@
 //           button is hidden (superseded).
 // Change requested: removed the small squares that indicate which coins are still available.
 //                  Only the Place buttons remain visible.
-// Fix: Play no longer forcibly evicts the other player from their role. When pressing Play the
-//      game state is reset but existing presenter/placer assignments are preserved unless the slot
-//      is empty or already belongs to the current user. This prevents the guest being thrown out.
+// Fixes: Play now swaps roles between players when the caller is already in the room.
+//        If caller isn't in the room, Play only assigns the selected role if the slot is empty
+//        (to avoid evicting another player).
 //
 // Put this file alongside index.html and styles.css and serve as described earlier.
 
@@ -317,8 +317,8 @@ function assignRoleWithTimestamp(obj, role, uidToAssign){
 }
 
 // --- Play handler (start a new game with current UI settings)
-// Important change: do NOT evict the existing other player when restarting.
-// Only assign a role to the current user if the slot is empty or already belongs to them.
+// IMPORTANT: When caller is already in room, swap roles with the other player to reflect the selected role.
+// If caller is not in room, only take a role when the slot is empty (no eviction).
 async function handlePlayClick(){
   const selectedCoinCount = coinCountSelect ? Number(coinCountSelect.value) : 5;
   const selectedComp = compSelect ? Number(compSelect.value) : 2;
@@ -343,7 +343,7 @@ async function handlePlayClick(){
       guestName: selectedGuestName,
       state: newState
     };
-    // assign role for creator
+    // assign role for creator (force)
     if(selectedRole === 'presenter') assignRoleWithTimestamp(room, 'presenter', uid);
     else if(selectedRole === 'placer') assignRoleWithTimestamp(room, 'placer', uid);
     // set phase
@@ -355,31 +355,73 @@ async function handlePlayClick(){
     return;
   }
 
-  // In-room: update atomically without evicting the other user
+  // In-room: update atomically with swap semantics if caller is already a participant
   const roomRefPath = ref(db, `rooms/${currentRoomId}`);
   try {
     await runTransaction(roomRefPath, cur => {
       if(cur == null) return cur;
-      // assign guestName into room (so all clients can use it)
+
+      // persist guestName
       cur.guestName = selectedGuestName;
 
-      // Only take a role if the slot is empty or already belongs to us.
-      if(selectedRole === 'presenter'){
-        if(!cur.presenter || cur.presenter === uid){
-          assignRoleWithTimestamp(cur, 'presenter', uid);
-        } else {
-          // slot taken by someone else -> keep as-is (do not evict)
-          // Optionally we could inform user; here we silently preserve the other player's slot.
+      const priorPresenter = cur.presenter || null;
+      const priorPlacer = cur.placer || null;
+      const priorPresenterAt = cur.presenterJoinedAt || null;
+      const priorPlacerAt = cur.placerJoinedAt || null;
+      const now = Date.now();
+
+      const callerInRoom = (priorPresenter === uid) || (priorPlacer === uid);
+
+      if(callerInRoom){
+        // Perform a role swap so both players keep being in the room but roles are swapped to reflect selection
+        if(selectedRole === 'presenter'){
+          // Set caller as presenter
+          cur.presenter = uid;
+          cur.presenterJoinedAt = now;
+          // The other player (if present and not caller) becomes placer
+          let other = (priorPresenter === uid) ? priorPlacer : (priorPlacer === uid) ? priorPresenter : priorPlacer;
+          if(other && other !== uid){
+            cur.placer = other;
+            // keep previous timestamp for that user if available
+            cur.placerJoinedAt = (other === priorPresenter) ? priorPresenterAt : priorPlacerAt;
+          } else {
+            cur.placer = null;
+            cur.placerJoinedAt = null;
+          }
+        } else if(selectedRole === 'placer'){
+          // Set caller as placer
+          cur.placer = uid;
+          cur.placerJoinedAt = now;
+          // The other player (if present and not caller) becomes presenter
+          let other = (priorPlacer === uid) ? priorPresenter : (priorPresenter === uid) ? priorPlacer : priorPresenter;
+          if(other && other !== uid){
+            cur.presenter = other;
+            cur.presenterJoinedAt = (other === priorPlacer) ? priorPlacerAt : priorPresenterAt;
+          } else {
+            cur.presenter = null;
+            cur.presenterJoinedAt = null;
+          }
         }
-      } else if(selectedRole === 'placer'){
-        if(!cur.placer || cur.placer === uid){
-          assignRoleWithTimestamp(cur, 'placer', uid);
-        } else {
-          // slot taken by someone else -> keep as-is
+      } else {
+        // Caller not in room. Do NOT evict someone. Only take the selected role if slot empty.
+        if(selectedRole === 'presenter'){
+          if(!cur.presenter){
+            assignRoleWithTimestamp(cur, 'presenter', uid);
+          } else {
+            // abort: presenter slot already taken
+            throw new Error('Presenter slot already taken — join the room first or choose another role.');
+          }
+        } else if(selectedRole === 'placer'){
+          if(!cur.placer){
+            assignRoleWithTimestamp(cur, 'placer', uid);
+          } else {
+            // abort: placer slot already taken
+            throw new Error('Placer slot already taken — join the room first or choose another role.');
+          }
         }
       }
 
-      // set new state and phase (preserve existing role assignments)
+      // set new state and phase
       cur.state = newState;
       cur.state.phase = (cur.presenter && cur.placer) ? 'offering' : 'waiting';
       // reset last outcome marker
@@ -406,11 +448,8 @@ async function handlePlayClick(){
   }
 }
 
-// --- Helpers: render coin controls
-// Modified to remove the small squares (spans) indicating availability.
-// Only Place buttons are rendered now.
+// --- Helpers: render coin controls (only Place buttons now)
 function renderCoinControls(coinCount, remaining){
-  // We still clear coinsContainer for compatibility, but do not render the small squares.
   if(coinsContainer) coinsContainer.innerHTML = '';
   coinButtonsContainer.innerHTML = '';
   for(let v=1; v<=coinCount; v++){
