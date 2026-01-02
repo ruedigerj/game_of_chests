@@ -251,7 +251,7 @@ function ensureLobbyControls(){
   guestWrapper.innerHTML = `<label for="guestSelect">Guest:</label>`;
   const gselect = document.createElement('select');
   gselect.id = 'guestSelect';
-  const guestNames = ['My guest', 'Burkhard', 'Heribert', 'Kester', 'Laura', 'Melanie', 'Robin'];
+  const guestNames = ['My guest', 'Burkhard', 'Heribert', 'Kester', 'Laura', 'Melanie', 'Patrick', 'Robin'];
   guestNames.forEach(name => {
     const opt = document.createElement('option');
     opt.value = name;
