@@ -3,8 +3,10 @@
 // Updated: guest detection uses the room.creator (the user who created the room).
 // Added: play a short click sound each time a coin is placed.
 // Added: play triumphant music if guest wins, sad music if guest loses (no sound on draw).
-// Added: "Guest:" selector with names (default "My guest"); final message shows selected name
-//         (e.g. "Robin won 7:6") instead of "My guest ...".
+// Added: "Guest:" selector with names (default "My guest"); final message shows selected name.
+// Reworked: "Refresh" button replaced by "Play". It can be pressed any time and starts a new game
+//           with selected coinCount, role, compensation and guest name. The bottom "New Game"
+//           button is hidden (superseded).
 //
 // Put this file alongside index.html and styles.css and serve as described earlier.
 
@@ -77,10 +79,10 @@ let localRole = null; // 'presenter'|'placer'|null
 let roomData = null;
 let isListening = false;
 
-// coinCount, compensation, refresh & guest UI controls (injected)
+// coinCount, compensation, play & guest UI controls (injected)
 let coinCountSelect = null;
 let compSelect = null;
-let refreshBtn = null;
+let playBtn = null;
 let guestSelect = null; // NEW: UI select for guest name
 
 // Default initial game state factory (defaults: coinCount=5, compensation=2)
@@ -101,7 +103,6 @@ function initialState(coinCount = 5, compensation = 2){
 }
 
 // --- Click sound & end-of-game music setup (Web Audio API)
-// Create a single AudioContext and helper functions to play sounds.
 const audioCtx = (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
   ? new (window.AudioContext || window.webkitAudioContext)()
   : null;
@@ -114,7 +115,6 @@ function resumeAudioContextIfNeeded(){
   return Promise.resolve();
 }
 
-// Short percussive click used when a coin is placed
 function playClick(){
   if(!audioCtx) return;
   resumeAudioContextIfNeeded().then(()=>{
@@ -122,17 +122,13 @@ function playClick(){
       const now = audioCtx.currentTime;
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
-
       osc.type = 'square';
       osc.frequency.setValueAtTime(1200, now);
-
       gain.gain.setValueAtTime(0.0001, now);
       gain.gain.exponentialRampToValueAtTime(0.12, now + 0.001);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
-
       osc.connect(gain);
       gain.connect(audioCtx.destination);
-
       osc.start(now);
       osc.stop(now + 0.07);
     }catch(err){
@@ -141,8 +137,6 @@ function playClick(){
   });
 }
 
-// Play a short sequence of notes. notes: array of {freq, dur}
-// type controls oscillator type
 function playSequence(notes, type = 'sine', volume = 0.12){
   if(!audioCtx) return;
   resumeAudioContextIfNeeded().then(()=>{
@@ -169,8 +163,6 @@ function playSequence(notes, type = 'sine', volume = 0.12){
   });
 }
 
-// Triumphant melody (major arpeggio)
-// Short uplifting pattern ~1.2s total
 function playTriumphant(){
   const C5 = 523.25, E5 = 659.25, G5 = 783.99, C6 = 1046.5;
   const notes = [
@@ -183,7 +175,6 @@ function playTriumphant(){
   playSequence(notes, 'triangle', 0.14);
 }
 
-// Sad melody (minor descending)
 function playSad(){
   const A4 = 440.0, F4 = 349.23, E4 = 329.63, D4 = 293.66;
   const notes = [
@@ -195,7 +186,6 @@ function playSad(){
   playSequence(notes, 'sine', 0.12);
 }
 
-// track last outcome played to avoid replaying on every DB update
 let lastOutcomePlayed = null; // 'win'|'lose'|'draw'|null
 
 // Auth
@@ -213,9 +203,9 @@ onAuthStateChanged(auth, user => {
   }
 });
 
-// --- Inject lobby controls (coinCount, compensation, guest selector and Refresh)
+// --- Inject lobby controls (coinCount, compensation, guest selector and Play)
 function ensureLobbyControls(){
-  if(coinCountSelect && compSelect && refreshBtn && guestSelect) return;
+  if(coinCountSelect && compSelect && playBtn && guestSelect) return;
   const lobbyControls = document.getElementById('lobby-controls');
   if(!lobbyControls) return;
 
@@ -261,46 +251,49 @@ function ensureLobbyControls(){
   guestWrapper.innerHTML = `<label for="guestSelect">Guest:</label>`;
   const gselect = document.createElement('select');
   gselect.id = 'guestSelect';
-  const guestNames = ['My guest', 'Burkhard', 'Heribert', 'Kester', 'Laura', 'Melanie', 'Robin', 'Rüdi'];
+  const guestNames = ['My guest', 'Burkhard', 'Heribert', 'Kester', 'Laura', 'Melanie', 'Robin'];
   guestNames.forEach(name => {
     const opt = document.createElement('option');
     opt.value = name;
     opt.textContent = name;
     gselect.appendChild(opt);
   });
-  // default "My guest"
   gselect.value = 'My guest';
   guestWrapper.appendChild(gselect);
 
-  // refresh button
-  const rWrapper = document.createElement('div');
-  rWrapper.style.display = 'flex';
-  rWrapper.style.alignItems = 'center';
-  rWrapper.style.marginLeft = '6px';
-  const rbtn = document.createElement('button');
-  rbtn.id = 'refreshBtn';
-  rbtn.textContent = 'Refresh';
-  rbtn.title = 'Reset game using selected coinCount/comp and assign you to chosen role (force-take if occupied)';
-  rbtn.style.padding = '6px 10px';
-  rbtn.disabled = false;
-  rWrapper.appendChild(rbtn);
+  // Play button (replaces Refresh)
+  const pWrapper = document.createElement('div');
+  pWrapper.style.display = 'flex';
+  pWrapper.style.alignItems = 'center';
+  pWrapper.style.marginLeft = '6px';
+  const pbtn = document.createElement('button');
+  pbtn.id = 'playBtn';
+  pbtn.textContent = 'Play';
+  pbtn.title = 'Start a new game using the selected coinCount, compensation, role and guest name';
+  pbtn.style.padding = '6px 10px';
+  pbtn.disabled = false;
+  pWrapper.appendChild(pbtn);
 
   // Insert controls before the Create Room button
   lobbyControls.insertBefore(ccWrapper, createRoomBtn);
   lobbyControls.insertBefore(compWrapper, createRoomBtn);
   lobbyControls.insertBefore(guestWrapper, createRoomBtn);
-  lobbyControls.insertBefore(rWrapper, createRoomBtn);
+  lobbyControls.insertBefore(pWrapper, createRoomBtn);
 
   coinCountSelect = select;
   compSelect = cselect;
-  refreshBtn = rbtn;
+  playBtn = pbtn;
   guestSelect = gselect;
 
-  refreshBtn.addEventListener('click', async () => {
-    await handleRefreshClick();
+  // Play button handler: start new game with selected settings
+  playBtn.addEventListener('click', async () => {
+    await handlePlayClick();
   });
 }
 ensureLobbyControls();
+
+// Hide bottom "New Game" button because Play supersedes it
+if(newGameBtn) newGameBtn.hidden = true;
 
 function shortId(u){ return u ? u.slice(0,8) : '—'; }
 
@@ -318,84 +311,83 @@ function assignRoleWithTimestamp(obj, role, uidToAssign){
   }
 }
 
-// --- Refresh logic (automatic force-take)
-async function handleRefreshClick(){
-  if(!currentRoomId){
-    if(localRole) roleSelect.value = localRole;
-    alert('Not in a room — local UI updated.');
-    return;
-  }
-
-  const roomRefPath = ref(db, `rooms/${currentRoomId}`);
-  let snap;
-  try {
-    snap = await get(roomRefPath);
-  } catch(e){
-    console.error('Failed to read room', e);
-    alert('Refresh failed: could not read room');
-    return;
-  }
-  if(!snap.exists()){
-    alert('Room not found on server.');
-    return;
-  }
-  const room = snap.val();
-  const state = room.state || {};
-  const phase = state.phase || 'waiting';
-  if(phase === 'offering' || phase === 'placing'){
-    alert('Cannot refresh while a round is active. Wait until the round ends.');
-    return;
-  }
-
-  const selectedCoinCount = coinCountSelect ? Number(coinCountSelect.value) : (state.coinCount || 5);
-  const selectedComp = compSelect ? Number(compSelect.value) : ((state.compensation === undefined || state.compensation === null) ? 2 : state.compensation);
+// --- Play handler (start a new game with current UI settings)
+// Behavior:
+//  - If not in a room: create a new room, set creator=uid, assign the selected role to current user, set room.guestName, set initial state, then joinRoom.
+//  - If already in a room: runTransaction on the room node to assign selected role to current user (force-take) and set room.state to the new initial state and room.guestName.
+// The Play button can be pressed at any time (it will restart the game).
+async function handlePlayClick(){
+  const selectedCoinCount = coinCountSelect ? Number(coinCountSelect.value) : 5;
+  const selectedComp = compSelect ? Number(compSelect.value) : 2;
   const selectedRole = roleSelect ? roleSelect.value : null; // 'presenter'|'placer' or null
+  const selectedGuestName = guestSelect ? guestSelect.value : 'My guest';
 
+  // Build new state
   const newState = initialState(selectedCoinCount, selectedComp);
-  newState.phase = (room.presenter && room.placer) ? 'offering' : 'waiting';
+  // If room already has both players, start offering immediately; otherwise waiting
+  // We'll set phase after obtaining room snapshot / transaction below.
 
+  if(!currentRoomId){
+    // Create new room and assign role to creator (current user)
+    const roomsRef = ref(db, 'rooms');
+    const newRoomRef = push(roomsRef);
+    const rid = newRoomRef.key;
+    const room = {
+      createdAt: Date.now(),
+      creator: uid,
+      presenter: null,
+      placer: null,
+      presenterJoinedAt: null,
+      placerJoinedAt: null,
+      guestName: selectedGuestName,
+      state: newState
+    };
+    // assign role for creator
+    if(selectedRole === 'presenter') assignRoleWithTimestamp(room, 'presenter', uid);
+    else if(selectedRole === 'placer') assignRoleWithTimestamp(room, 'placer', uid);
+    // set phase
+    room.state.phase = (room.presenter && room.placer) ? 'offering' : 'waiting';
+    await set(newRoomRef, room);
+    // join the created room
+    await joinRoom(rid, selectedRole);
+    lastOutcomePlayed = null;
+    return;
+  }
+
+  // In-room: update atomically
+  const roomRefPath = ref(db, `rooms/${currentRoomId}`);
   try {
     await runTransaction(roomRefPath, cur => {
       if(cur == null) return cur;
-      const curPhase = (cur.state && cur.state.phase) ? cur.state.phase : 'waiting';
-      if(curPhase === 'offering' || curPhase === 'placing') {
-        throw new Error('Active round detected on server; aborting refresh.');
-      }
-
-      // Role assignment logic (force-take automatically).
-      if(selectedRole === 'presenter'){
-        assignRoleWithTimestamp(cur, 'presenter', uid);
-      } else if(selectedRole === 'placer'){
-        assignRoleWithTimestamp(cur, 'placer', uid);
-      }
-
-      // Preserve creator if present. We don't overwrite creator on refresh.
-      // Set the restarted state
+      // assign guestName into room (so all clients can use it)
+      cur.guestName = selectedGuestName;
+      // assign role to current user (force-take)
+      if(selectedRole === 'presenter') assignRoleWithTimestamp(cur, 'presenter', uid);
+      else if(selectedRole === 'placer') assignRoleWithTimestamp(cur, 'placer', uid);
+      // set new state and phase
       cur.state = newState;
-      // Reset lastOutcomePlayed since game restarted
+      cur.state.phase = (cur.presenter && cur.placer) ? 'offering' : 'waiting';
+      // reset last outcome marker
       lastOutcomePlayed = null;
       return cur;
     });
-  } catch(err) {
-    console.error('Refresh transaction failed', err);
-    alert('Refresh failed: ' + (err.message || err));
+  }catch(err){
+    console.error('Play transaction failed', err);
+    alert('Play failed: ' + (err.message || err));
     return;
   }
 
+  // Update UI immediately
   renderCoinControls(selectedCoinCount, newState.remaining);
-  try {
+  try{
     const snap2 = await get(roomRefPath);
     if(snap2.exists()){
       const updated = snap2.val();
       if(updated.presenter === uid) roleSelect.value = 'presenter';
       else if(updated.placer === uid) roleSelect.value = 'placer';
-      alert(`Room reset: coinCount=${selectedCoinCount}, compensation=${selectedComp}`);
-    } else {
-      alert('Room updated but could not read confirmation.');
     }
-  } catch(e){
-    console.warn('Refresh post-read failed', e);
-    alert('Room reset but failed to verify.');
+  }catch(e){
+    console.warn('Post-play read failed', e);
   }
 }
 
@@ -475,7 +467,7 @@ async function placeCoinTransaction(coin){
   }
 }
 
-// --- Room creation & join handlers (now store creator when creating a room)
+// --- Room creation & join handlers
 createRoomBtn.addEventListener('click', async () => {
   const role = roleSelect.value;
   const coinCount = coinCountSelect ? Number(coinCountSelect.value) : 5;
@@ -486,18 +478,19 @@ createRoomBtn.addEventListener('click', async () => {
 
   const room = {
     createdAt: Date.now(),
-    creator: uid,             // record the room opener
+    creator: uid,
     presenter: null,
     placer: null,
     presenterJoinedAt: null,
     placerJoinedAt: null,
+    guestName: guestSelect ? guestSelect.value : 'My guest',
     state: initialState(coinCount, compensation)
   };
 
-  // assign role for creator and set timestamp
   if(role === 'presenter') assignRoleWithTimestamp(room, 'presenter', uid);
   else if(role === 'placer') assignRoleWithTimestamp(room, 'placer', uid);
 
+  room.state.phase = (room.presenter && room.placer) ? 'offering' : 'waiting';
   await set(newRoomRef, room);
   joinRoom(rid, role);
 });
@@ -670,9 +663,9 @@ function renderState(state){
 
   const phase = state.phase || 'waiting';
 
-  if(refreshBtn) {
-    const inGame = (phase === 'offering' || phase === 'placing');
-    refreshBtn.disabled = inGame;
+  if(playBtn) {
+    // Play is always available (user requested), so keep enabled.
+    playBtn.disabled = false;
   }
 
   if(phase === 'waiting'){
@@ -759,15 +752,13 @@ function renderState(state){
       opponentScore = s1;
     }
 
-    // Determine selected guest name from UI (default "My guest")
-    const guestName = (guestSelect && guestSelect.value) ? guestSelect.value : 'My guest';
+    // Determine selected guest name: prefer room.guestName (persisted), fall back to UI
+    const guestName = (roomData && roomData.guestName) ? roomData.guestName : (guestSelect ? guestSelect.value : 'My guest');
 
-    // Compose message from guest perspective with chosen name; format scores as "7:6"
+    // Compose message from guest perspective with chosen name and past tense; format "7:6"
     if(winnerSide === 'draw'){
       resultText.textContent = `The game ended in a draw ${guestScore}:${opponentScore}`;
-      if(lastOutcomePlayed !== 'draw'){
-        lastOutcomePlayed = 'draw';
-      }
+      if(lastOutcomePlayed !== 'draw') lastOutcomePlayed = 'draw';
     } else {
       const guestWon = (winnerSide === guestRole);
       if(guestWon){
@@ -826,16 +817,11 @@ offers.forEach(b => b.addEventListener('click', async (e) => {
   }
 }));
 
-// --- Reset/new-game handler (unchanged)
-newGameBtn.addEventListener('click', async () => {
-  if(!currentRoomId) return;
-  if(!confirm('Reset game to initial state?')) return;
-  const coinCount = (roomData && roomData.state && roomData.state.coinCount) ? roomData.state.coinCount : (coinCountSelect ? Number(coinCountSelect.value) : 5);
-  const compensation = (roomData && roomData.state && (roomData.state.compensation !== undefined && roomData.state.compensation !== null)) ? Number(roomData.state.compensation) : (compSelect ? Number(compSelect.value) : 2);
-  const sRef = ref(db, `rooms/${currentRoomId}/state`);
-  await set(sRef, initialState(coinCount, compensation));
-  lastOutcomePlayed = null;
-});
+// --- Reset/new-game handler hidden (Play supersedes it)
+if(newGameBtn) {
+  newGameBtn.style.display = 'none';
+  newGameBtn.disabled = true;
+}
 
 // Periodic check to move waiting -> offering when both players present
 setInterval(async () => {
